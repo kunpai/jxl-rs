@@ -10,14 +10,14 @@ use crate::frame::VarDctBuffers;
 use crate::frame::modular::ScratchSpace;
 use crate::image::{Image, ImageDataType, OwnedRawImage};
 use crate::util::PerThreadStorage;
-use crate::util::sync::Mutex;
+use crate::util::sync::{Mutex, OnceLock};
 
 struct BufferBucket {
     images: Mutex<Vec<OwnedRawImage>>,
 }
 
 pub(crate) struct BufferRecycler {
-    buckets: HashMap<(usize, usize), BufferBucket>,
+    buckets: OnceLock<HashMap<(usize, usize), BufferBucket>>,
     pub(crate) vardct_buffers: PerThreadStorage<VarDctBuffers>,
     pub(crate) modular_scratch: PerThreadStorage<ScratchSpace>,
 }
@@ -30,6 +30,18 @@ impl Default for BufferRecycler {
 
 impl BufferRecycler {
     pub(crate) fn new() -> Self {
+        Self {
+            buckets: OnceLock::new(),
+            vardct_buffers: PerThreadStorage::new(VarDctBuffers::new),
+            modular_scratch: PerThreadStorage::new(ScratchSpace::new),
+        }
+    }
+
+    fn buckets(&self) -> &HashMap<(usize, usize), BufferBucket> {
+        self.buckets.get_or_init(Self::new_buckets)
+    }
+
+    fn new_buckets() -> HashMap<(usize, usize), BufferBucket> {
         let group_dims = [128, 256, 512, 1024];
         let ty_sizes = [2, 4];
         let group_shifts = [0, 1, 2, 3];
@@ -58,11 +70,7 @@ impl BufferRecycler {
                 }
             }
         }
-        Self {
-            buckets,
-            vardct_buffers: PerThreadStorage::new(VarDctBuffers::new),
-            modular_scratch: PerThreadStorage::new(ScratchSpace::new),
-        }
+        buckets
     }
 
     pub(crate) fn get_buffer<T: ImageDataType>(&self, size: (usize, usize)) -> Result<Image<T>> {
@@ -79,7 +87,7 @@ impl BufferRecycler {
         byte_size: (usize, usize),
         zero_if_recycled: bool,
     ) -> Result<OwnedRawImage> {
-        self.buckets
+        self.buckets()
             .get(&byte_size)
             .and_then(|x| x.images.lock().unwrap().pop())
             .map(|mut img| {
@@ -99,7 +107,7 @@ impl BufferRecycler {
 
     pub(crate) fn recycle_raw_buffer(&self, buffer: OwnedRawImage) {
         let byte_size = buffer.byte_size();
-        if let Some(b) = self.buckets.get(&byte_size) {
+        if let Some(b) = self.buckets().get(&byte_size) {
             b.images.lock().unwrap().push(buffer);
         }
     }
